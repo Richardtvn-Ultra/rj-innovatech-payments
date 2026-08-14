@@ -7,14 +7,15 @@
  */
 
 require('dotenv').config();
-const express   = require('express');
-const cors      = require('cors');
-const helmet    = require('helmet');
-const rateLimit = require('express-rate-limit');
-const fs        = require('fs');
-const path      = require('path');
-const crypto    = require('crypto');
-const net       = require('net');
+const express    = require('express');
+const cors       = require('cors');
+const helmet     = require('helmet');
+const rateLimit  = require('express-rate-limit');
+const fs         = require('fs');
+const path       = require('path');
+const crypto     = require('crypto');
+const net        = require('net');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -33,10 +34,29 @@ const ORDERS_FILE         = path.join(__dirname, 'orders.json');
 const ORDERS_USER         = process.env.ORDERS_USER || '';
 const ORDERS_PASS         = process.env.ORDERS_PASS || '';
 
+// SMTP - sends a plain notification email (via the business's own mail server,
+// e.g. Afrihost) to NOTIFY_EMAIL the moment an order is paid. Optional: orders
+// are always logged and visible at /orders regardless of whether this is set.
+const SMTP_HOST    = process.env.SMTP_HOST || '';
+const SMTP_PORT    = parseInt(process.env.SMTP_PORT, 10) || 465;
+const SMTP_USER    = process.env.SMTP_USER || '';
+const SMTP_PASS    = process.env.SMTP_PASS || '';
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || SMTP_USER;
+
+const mailTransport = SMTP_HOST && SMTP_USER && SMTP_PASS
+  ? nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465, // 465 = implicit TLS, 587/25 = STARTTLS
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    })
+  : null;
+
 // ── STARTUP CONFIG WARNINGS ───────────────────────────────────────────────────
 // Misconfiguration here is a security issue, not just a bug, so make it loud.
 if (!YOCO_WEBHOOK_SECRET) console.warn('⚠️  YOCO_WEBHOOK_SECRET is not set - webhook will reject everything until it is.');
 if (!ORDERS_USER || !ORDERS_PASS) console.warn('⚠️  ORDERS_USER/ORDERS_PASS not set - /orders will be LOCKED (fails closed), not open.');
+if (!mailTransport) console.warn('ℹ️  SMTP_HOST/SMTP_USER/SMTP_PASS not fully set - order notification emails are disabled (orders are still logged at /orders).');
 if (ALLOWED_ORIGIN === '*') console.warn('⚠️  ALLOWED_ORIGIN is "*" - any website can call this API. Set it to your real site origin.');
 
 // ── FIXED SERVER-SIDE PRICING ────────────────────────────────────────────────
@@ -217,6 +237,38 @@ async function notifyOrderPaid(order) {
     console.log(`NOTIFY: CallMeBot WhatsApp -> HTTP ${resp.status}`);
   } catch (err) {
     console.error('NOTIFY: CallMeBot WhatsApp failed:', err.message);
+  }
+}
+
+// ── OPTIONAL EMAIL NOTIFICATION (via the business's own SMTP mail server) ───
+async function notifyOrderEmail(order) {
+  if (!mailTransport) return; // not configured - orders are still logged and visible at /orders
+
+  const domainLine = order.domainOrder
+    ? `${order.domainOrder.domain} (${order.domainOrder.option}, R${(order.domainOrder.amount / 100).toFixed(2)})`
+    : `${order.domain} (already owned)`;
+
+  const text =
+    'A new order has been paid on rjinnovatech.co.za.\n\n' +
+    'Package: ' + order.packageLabel + '\n' +
+    'Name: ' + order.name + '\n' +
+    'Email: ' + order.email + '\n' +
+    'Phone: ' + (order.phone || '-') + '\n' +
+    'Domain: ' + domainLine + '\n' +
+    'Amount: R' + (order.amount / 100).toFixed(2) + '\n' +
+    'Reference: ' + order.orderId + '\n\n' +
+    'View all orders: ' + SITE_URL.replace('rjinnovatech.co.za', 'pay.rjinnovatech.co.za') + '/orders';
+
+  try {
+    await mailTransport.sendMail({
+      from: SMTP_USER,
+      to: NOTIFY_EMAIL,
+      subject: `New order paid - ${order.packageLabel} - R${(order.amount / 100).toFixed(2)}`,
+      text,
+    });
+    console.log('NOTIFY: order email sent to', NOTIFY_EMAIL);
+  } catch (err) {
+    console.error('NOTIFY: order email failed:', err.message);
   }
 }
 
@@ -432,6 +484,7 @@ app.post('/api/yoco/webhooks', webhookLimiter, express.raw({ type: 'application/
     order.paymentId = payload.id || null;
     saveOrders(orders);
     notifyOrderPaid(order);
+    notifyOrderEmail(order);
   } else {
     order.status = 'failed';
     saveOrders(orders);
