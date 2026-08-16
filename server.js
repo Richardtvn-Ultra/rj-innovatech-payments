@@ -15,7 +15,6 @@ const fs         = require('fs');
 const path       = require('path');
 const crypto     = require('crypto');
 const net        = require('net');
-const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -34,29 +33,43 @@ const ORDERS_FILE         = path.join(__dirname, 'orders.json');
 const ORDERS_USER         = process.env.ORDERS_USER || '';
 const ORDERS_PASS         = process.env.ORDERS_PASS || '';
 
-// SMTP - sends a plain notification email (via the business's own mail server,
-// e.g. Afrihost) to NOTIFY_EMAIL the moment an order is paid. Optional: orders
-// are always logged and visible at /orders regardless of whether this is set.
-const SMTP_HOST    = process.env.SMTP_HOST || '';
-const SMTP_PORT    = parseInt(process.env.SMTP_PORT, 10) || 465;
-const SMTP_USER    = process.env.SMTP_USER || '';
-const SMTP_PASS    = process.env.SMTP_PASS || '';
-const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || SMTP_USER;
+// EMAIL NOTIFICATIONS via Resend's HTTPS API (not raw SMTP). Raw SMTP from this
+// host to the business's own mail server was confirmed to hang indefinitely -
+// ETIMEDOUT on both port 465 and 587, plus a 2-minute nodemailer verify()
+// timeout - almost certainly the receiving mail server silently dropping
+// connections from cloud/hosting IP ranges, a common anti-spam measure on
+// shared-hosting mailboxes. HTTPS (443) doesn't hit that class of block.
+// Optional: orders are always logged and visible at /orders regardless of
+// whether this is set.
+const RESEND_API_KEY    = process.env.RESEND_API_KEY || '';
+const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || 'Sales@rjinnovatech.co.za';
+const NOTIFY_EMAIL      = process.env.NOTIFY_EMAIL || NOTIFY_FROM_EMAIL;
 
-const mailTransport = SMTP_HOST && SMTP_USER && SMTP_PASS
-  ? nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_PORT === 465, // 465 = implicit TLS, 587/25 = STARTTLS
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-    })
-  : null;
+async function sendNotifyEmail(subject, text) {
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: `RJ Innovatech <${NOTIFY_FROM_EMAIL}>`,
+      to: [NOTIFY_EMAIL],
+      subject,
+      text,
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Resend API ${resp.status}: ${body.slice(0, 300)}`);
+  }
+}
 
 // ── STARTUP CONFIG WARNINGS ───────────────────────────────────────────────────
 // Misconfiguration here is a security issue, not just a bug, so make it loud.
 if (!YOCO_WEBHOOK_SECRET) console.warn('⚠️  YOCO_WEBHOOK_SECRET is not set - webhook will reject everything until it is.');
 if (!ORDERS_USER || !ORDERS_PASS) console.warn('⚠️  ORDERS_USER/ORDERS_PASS not set - /orders will be LOCKED (fails closed), not open.');
-if (!mailTransport) console.warn('ℹ️  SMTP_HOST/SMTP_USER/SMTP_PASS not fully set - order notification emails are disabled (orders are still logged at /orders).');
+if (!RESEND_API_KEY) console.warn('ℹ️  RESEND_API_KEY is not set - order notification emails are disabled (orders are still logged at /orders).');
 if (ALLOWED_ORIGIN === '*') console.warn('⚠️  ALLOWED_ORIGIN is "*" - any website can call this API. Set it to your real site origin.');
 
 // ── FIXED SERVER-SIDE PRICING ────────────────────────────────────────────────
@@ -240,9 +253,9 @@ async function notifyOrderPaid(order) {
   }
 }
 
-// ── OPTIONAL EMAIL NOTIFICATION (via the business's own SMTP mail server) ───
+// ── OPTIONAL EMAIL NOTIFICATION (via Resend's HTTPS API) ─────────────────────
 async function notifyOrderEmail(order) {
-  if (!mailTransport) return; // not configured - orders are still logged and visible at /orders
+  if (!RESEND_API_KEY) return; // not configured - orders are still logged and visible at /orders
 
   const domainLine = order.domainOrder
     ? `${order.domainOrder.domain} (${order.domainOrder.option}, R${(order.domainOrder.amount / 100).toFixed(2)})`
@@ -260,12 +273,7 @@ async function notifyOrderEmail(order) {
     'View all orders: ' + SITE_URL.replace('rjinnovatech.co.za', 'pay.rjinnovatech.co.za') + '/orders';
 
   try {
-    await mailTransport.sendMail({
-      from: SMTP_USER,
-      to: NOTIFY_EMAIL,
-      subject: `New order paid - ${order.packageLabel} - R${(order.amount / 100).toFixed(2)}`,
-      text,
-    });
+    await sendNotifyEmail(`New order paid - ${order.packageLabel} - R${(order.amount / 100).toFixed(2)}`, text);
     console.log('NOTIFY: order email sent to', NOTIFY_EMAIL);
   } catch (err) {
     console.error('NOTIFY: order email failed:', err.message);
