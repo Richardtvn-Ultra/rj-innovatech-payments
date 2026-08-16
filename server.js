@@ -474,8 +474,36 @@ app.post('/api/yoco/webhooks', webhookLimiter, express.raw({ type: 'application/
   if (!orderId) return;
 
   const orders = loadOrders();
-  const order = orders.find(o => o.orderId === orderId);
-  if (!order) { console.warn('Webhook for unknown order:', orderId); return; }
+  let order = orders.find(o => o.orderId === orderId);
+
+  if (!order) {
+    // Local order record is missing (e.g. the server's local storage was reset
+    // between checkout creation and the webhook arriving) - reconstruct a minimal
+    // order straight from the metadata Yoco echoes back on the webhook, so
+    // notifications and /orders still work even without the original record.
+    const md = payload.metadata || {};
+    const pkg = PACKAGES[md.package];
+    order = {
+      orderId,
+      status: 'pending',
+      package: md.package || '',
+      packageLabel: pkg ? pkg.label : (md.package || 'Unknown package'),
+      packageAmount: pkg ? pkg.amount : null,
+      domain: md.domain || '',
+      domainOption: md.domainOption || 'own',
+      domainOrder: md.domainPurchase ? { option: md.domainOption, domain: md.domainPurchase, amount: 0 } : null,
+      amount: typeof payload.amount === 'number' ? payload.amount : (pkg ? pkg.amount : 0),
+      name: md.name || '',
+      email: md.email || '',
+      phone: md.phone || '',
+      createdAt: new Date().toISOString(),
+      paidAt: null,
+      checkoutId: null,
+      paymentId: null,
+    };
+    orders.unshift(order);
+    console.warn('Webhook for unknown order, reconstructed from metadata:', orderId);
+  }
 
   if (event.type === 'payment.succeeded') {
     if (order.status === 'paid') return; // already processed (webhook retry) - avoid double notify
