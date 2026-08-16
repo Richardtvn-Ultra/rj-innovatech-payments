@@ -519,62 +519,6 @@ app.post('/api/yoco/webhooks', webhookLimiter, express.raw({ type: 'application/
   }
 });
 
-// ── TEMP: SMTP CONNECTIVITY DIAGNOSTIC (remove after use) ────────────────────
-// Tests raw TCP/TLS connectivity to SMTP_HOST on 465 and 587 from this server's
-// actual network, plus a full nodemailer auth verify(). Gated on DEBUG_TOKEN so
-// it's not publicly probeable; returns 404 if that env var isn't set or doesn't match.
-app.get('/debug/smtp', async (req, res) => {
-  if (!process.env.DEBUG_TOKEN || req.query.token !== process.env.DEBUG_TOKEN) {
-    return res.status(404).end();
-  }
-  const tls = require('tls');
-  const net = require('net');
-
-  function testPort(port, useTls) {
-    const start = Date.now();
-    return new Promise((resolve) => {
-      let sock;
-      let done = false;
-      const finish = (status, err) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve({ port, tls: useTls, status, ms: Date.now() - start, error: err ? (err.code || err.message) : null });
-      };
-      const timer = setTimeout(() => { try { sock.destroy(); } catch {} finish('timeout'); }, 8000);
-      try {
-        const onConnect = () => { try { sock.end(); } catch {} finish('connected'); };
-        sock = useTls
-          ? tls.connect({ host: SMTP_HOST, port, timeout: 8000 }, onConnect)
-          : net.createConnection({ host: SMTP_HOST, port, timeout: 8000 }, onConnect);
-        sock.on('error', (err) => finish('error', err));
-      } catch (err) {
-        finish('error', err);
-      }
-    });
-  }
-
-  const results = {
-    smtpHost: SMTP_HOST,
-    mailTransportConfigured: !!mailTransport,
-    port465: await testPort(465, true),
-    port587: await testPort(587, false),
-  };
-
-  if (mailTransport) {
-    const start = Date.now();
-    try {
-      await mailTransport.verify();
-      results.nodemailerVerify = { ok: true, ms: Date.now() - start };
-    } catch (err) {
-      results.nodemailerVerify = { ok: false, ms: Date.now() - start, error: err.message, code: err.code };
-    }
-  }
-
-  res.json(results);
-});
-
-// ── ORDERS DASHBOARD ───────────────────────────────────────────────────────────
 app.get('/orders', dashLimiter, requireOrdersAuth, (_, res) => {
   const orders = loadOrders();
 
