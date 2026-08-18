@@ -599,6 +599,19 @@ app.get('/orders', dashLimiter, requireOrdersAuth, (_, res) => {
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/health', (_, res) => res.json({ status: 'ok', service: 'rj-innovatech-payments' }));
 
+// ── TEMPORARY: verify Resend email delivery end-to-end, remove after confirming ──
+app.get('/debug/test-email', async (req, res) => {
+  if (!process.env.DEBUG_TOKEN || req.query.token !== process.env.DEBUG_TOKEN) {
+    return res.status(404).end();
+  }
+  try {
+    await sendNotifyEmail('Test email - RJ Innovatech notification pipeline', `This is a live test of the Resend notification pipeline, sent at ${new Date().toISOString()}.`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── START ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {
